@@ -221,44 +221,6 @@ def parse_requirements_file(filepath, phase_filter=None):
                     pass
     
     return records
-            if state['detail_code'] and state['phase']:
-                try:
-                    if isinstance(cell_value, str):
-                        req_date = datetime.strptime(cell_value.split()[0], '%d.%m.%Y').date()
-                    else:
-                        req_date = pd.to_datetime(cell_value).date()
-                    
-                    req_month = req_date.replace(day=1)
-                    
-                    # Количество
-                    quantity = 0
-                    for col in range(hierarchy_levels[current_level]['col'] + 1, ncols):
-                        val = row[col]
-                        if pd.notna(val) and val != '-':
-                            try:
-                                quantity = int(val)
-                                break
-                            except:
-                                pass
-                    
-                    if quantity > 0:
-                        record = {
-                            'detail_code': state['detail_code'],
-                            'phase': state['phase'],
-                            'assembly': state['assembly'],
-                            'requirement_month': req_month,
-                            'required_quantity': quantity
-                        }
-                        
-                        if phase_filter is None or phase_filter == 'all':
-                            records.append(record)
-                        elif phase_filter in phase_map and state['phase'] == phase_map[phase_filter]:
-                            records.append(record)
-                
-                except (ValueError, AttributeError):
-                    pass
-    
-    return records
 
 def parse_inventory_file(filepath):
     """
