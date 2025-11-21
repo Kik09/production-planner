@@ -52,10 +52,8 @@ def parse_requirements_file(filepath, phase_filter=None):
     df = pd.read_excel(filepath, sheet_name=0, header=None)
     nrows, ncols = df.shape
     
-    # 1. Пропускаем служебные строки (описание отчёта)
+    # 1. Пропускаем служебные строки (содержат двоеточие)
     current_row = 0
-    service_patterns = [r'Группировки строк', r'Отбор', r'Упорядочивание', 
-                       r'Оформление', r'Настройки']
     
     while current_row < min(15, nrows):
         row = df.iloc[current_row]
@@ -63,7 +61,7 @@ def parse_requirements_file(filepath, phase_filter=None):
             current_row += 1
             continue
         
-        # Проверяем первую непустую ячейку
+        # Первая непустая ячейка
         first_cell = None
         for col in range(ncols):
             val = str(row[col]) if pd.notna(row[col]) else ''
@@ -71,8 +69,8 @@ def parse_requirements_file(filepath, phase_filter=None):
                 first_cell = val
                 break
         
-        # Служебная строка?
-        if first_cell and any(re.search(pattern, first_cell) for pattern in service_patterns):
+        # Служебная строка = содержит двоеточие
+        if first_cell and ':' in first_cell:
             print(f"⏭️  Пропуск служебной строки {current_row}: {first_cell[:50]}...")
             current_row += 1
             continue
