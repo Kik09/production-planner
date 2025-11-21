@@ -83,30 +83,43 @@ def parse_requirements_file(filepath, phase_filter=None):
         
         current_row += 1
     
-    # 2. Парсим заголовки - это иерархия
+    # 2. Парсим заголовки - это иерархия (может быть несколько строк!)
     hierarchy_levels = []
     header_row = current_row
     
     if header_row < nrows:
-        row = df.iloc[header_row]
-        print(f"\n📋 Строка заголовков: {header_row}")
+        print(f"\n📋 Чтение заголовков начиная со строки {header_row}")
         
-        for col in range(ncols):
-            val = str(row[col]) if pd.notna(row[col]) else ''
-            val = val.strip()
-            if val and val != '-':
-                hierarchy_levels.append({
-                    'col': col,
-                    'name': val
-                })
-                print(f"   Уровень {len(hierarchy_levels)-1}: колонка {col} - '{val}'")
+        # Читаем все строки заголовков до первой пустой
+        level_idx = 0
+        while header_row < nrows:
+            row = df.iloc[header_row]
+            
+            # Пустая строка = конец заголовков
+            if is_empty_row(row):
+                break
+            
+            # Ищем первую непустую ячейку в строке
+            for col in range(ncols):
+                val = str(row[col]) if pd.notna(row[col]) else ''
+                val = val.strip()
+                if val and val != '-':
+                    hierarchy_levels.append({
+                        'col': col,
+                        'name': val
+                    })
+                    print(f"   Уровень {level_idx}: колонка {col} - '{val}'")
+                    level_idx += 1
+                    break  # Только первая непустая ячейка
+            
+            header_row += 1
     
     if not hierarchy_levels:
         print("❌ Не найдены заголовки иерархии")
         return []
     
-    # 3. Начало данных - после заголовков + пустые строки
-    start_row = header_row + 1
+    # 3. Начало данных - после заголовков (header_row уже указывает на пустую строку или первую строку данных)
+    start_row = header_row
     while start_row < nrows and is_empty_row(df.iloc[start_row]):
         start_row += 1
     
