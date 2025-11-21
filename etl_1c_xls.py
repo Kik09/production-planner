@@ -123,77 +123,104 @@ def parse_requirements_file(filepath, phase_filter=None):
     
     print(f"\n📊 Начало данных: строка {start_row}\n")
     
-    # 4. Парсим данные: уровень по колонке, тип по паттерну
+    # 4. Парсим данные: паттерны для уровней + автоинкремент
     records = []
     state = {'phase': None, 'assembly': None, 'detail_code': None}
     
-    # Паттерны для типов данных
-    phase_pat = re.compile(r'^(Отливка|Зачистка|Дробеструй|Токарка|Фрезеровка|Слесарка|Алюминий)')
-    detail_pat = re.compile(r'К\d+\.\d+\.\d+')
-    date_pat = re.compile(r'\d{2}\.\d{2}\.\d{4}')
+    # Определяем паттерны для каждого уровня иерархии
+    def is_phase(text):
+        return bool(re.match(r'^(Отливка|Зачистка|Дробеструй|Токарка|Фрезеровка|Слесарка|Алюминий)', text))
+    
+    def is_assembly(text):
+        return bool(re.search(r'^\d{4}$|кресло|Лестница|Комплект|Опора|Привод|Поручень', text))
+    
+    def is_okp(text):
+        return bool(re.match(r'^\(\d+-\d+\)$', text))  # (1-4)
+    
+    def is_detail(text):
+        return bool(re.search(r'К\d+\.\d+\.\d+', text))
+    
+    def is_date(text):
+        return bool(re.search(r'\d{2}\.\d{2}\.\d{4}', text))
+    
+    # Маппинг уровней на функции проверки
+    level_matchers = [
+        is_phase,    # 0: ХарактеристикаНоменклатуры.Наименование
+        is_assembly, # 1: Номенклатура.Артикул
+        is_okp,      # 2: ХарактеристикаНоменклатуры.ОКП
+        is_detail,   # 3: Номенклатура
+        is_date      # 4: ЗаказНаПроизводство.Дата запуска
+    ]
+    
+    current_level = 0
     
     for i in range(start_row, nrows):
         row = df.iloc[i]
         if is_empty_row(row):
             continue
         
-        # Находим первую непустую ячейку и её колонку
+        # Первая непустая ячейка
         cell_value = None
-        cell_col = None
         for col in range(ncols):
             val = row[col]
             if pd.notna(val) and str(val).strip() and str(val).strip() != '-':
                 cell_value = str(val).strip()
-                cell_col = col
                 break
         
         if not cell_value:
             continue
         
-        # Определяем уровень по колонке
-        current_level = None
-        for level_idx, level in enumerate(hierarchy_levels):
-            if level['col'] == cell_col:
+        # Пробуем матчить против всех уровней
+        matched = False
+        for level_idx, matcher in enumerate(level_matchers):
+            if matcher(cell_value):
                 current_level = level_idx
+                matched = True
                 break
         
-        if current_level is None:
-            continue
+        # Если не совпало - инкремент или сброс
+        if not matched:
+            if current_level >= len(level_matchers) - 1:
+                current_level = 0  # Сброс
+            else:
+                current_level += 1
         
-        print(f"Строка {i:3d} | Уровень {current_level} (col {cell_col}): {cell_value[:50]}")
+        print(f"Строка {i:3d} | Уровень {current_level}: {cell_value[:50]}")
         
-        # Обработка по уровню + паттерну
+        # Обработка по уровню
         if current_level == 0:  # Фаза
-            if phase_pat.match(cell_value):
-                phase = cell_value.split()[0].lower()
-                if phase == 'алюминий': phase = 'материал'
-                elif phase == 'токарка': phase = 'фрезеровка'
-                state['phase'] = phase
-                state['assembly'] = None
-                state['detail_code'] = None
+            phase = cell_value.split()[0].lower()
+            if phase == 'алюминий': phase = 'материал'
+            elif phase == 'токарка': phase = 'фрезеровка'
+            state['phase'] = phase
+            state['assembly'] = None
+            state['detail_code'] = None
         
-        elif current_level == 1:  # Сборка/Артикул
+        elif current_level == 1:  # Сборка
             state['assembly'] = cell_value
             state['detail_code'] = None
+        
+        elif current_level == 2:  # ОКП - пропускаем
+            pass
         
         elif current_level == 3:  # Деталь
             match = re.search(r'\((К\d+\.\d+\.\d+[^\)]*)\)', cell_value)
             if match:
                 state['detail_code'] = match.group(1)
             else:
-                match = detail_pat.search(cell_value)
+                match = re.search(r'(К\d+\.\d+\.\d+[\.\d]*)', cell_value)
                 if match:
                     state['detail_code'] = match.group(0)
         
         elif current_level == 4:  # Дата
-            if date_pat.search(cell_value) and state['detail_code'] and state['phase']:
+            if state['detail_code'] and state['phase']:
                 try:
                     req_date = datetime.strptime(cell_value.split()[0], '%d.%m.%Y').date()
                     req_month = req_date.replace(day=1)
                     
-                    # Количество в следующих колонках
+                    # Количество
                     quantity = 0
-                    for col in range(cell_col + 1, ncols):
+                    for col in range(1, ncols):
                         val = row[col]
                         if pd.notna(val) and val != '-':
                             try:
