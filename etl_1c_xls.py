@@ -125,7 +125,7 @@ def parse_requirements_file(filepath, phase_filter=None):
     
     print(f"\n📊 Начало данных: строка {start_row}\n")
     
-    # 4. Парсим данные с debug выводом уровня
+    # 4. Парсим данные с определением уровня по паттерну содержимого
     records = []
     state = {
         'phase': None,
@@ -133,52 +133,59 @@ def parse_requirements_file(filepath, phase_filter=None):
         'detail_code': None
     }
     
+    # Паттерны для определения уровня
+    phase_pattern = re.compile(r'^(Отливка|Зачистка|Дробеструй|Токарка|Фрезеровка|Слесарка|Алюминий)')
+    assembly_pattern = re.compile(r'^\d{4}$|кресло|Лестница|Комплект|Опора|Привод|Поручень')
+    bracket_pattern = re.compile(r'^\(\d+-\d+\)$')  # (1-4)
+    detail_pattern = re.compile(r'К\d+\.\d+\.\d+')
+    date_pattern = re.compile(r'\d{2}\.\d{2}\.\d{4}')
+    
     for i in range(start_row, nrows):
         row = df.iloc[i]
         
         if is_empty_row(row):
             continue
         
-        # Определяем уровень по первой непустой ячейке
-        current_level = None
+        # Берём первую непустую ячейку
         cell_value = None
-        
-        for level_idx, level in enumerate(hierarchy_levels):
-            col = level['col']
+        for col in range(ncols):
             val = row[col]
             if pd.notna(val) and str(val).strip() and str(val).strip() != '-':
-                current_level = level_idx
                 cell_value = str(val).strip()
                 break
         
-        if current_level is None:
+        if not cell_value:
             continue
         
-        # DEBUG: выводим уровень
-        print(f"Строка {i:3d} | Уровень {current_level}: {cell_value[:60]}")
-        
-        # Обработка в зависимости от уровня
+        # Определяем уровень по паттерну
+        current_level = None
         
         # Уровень 0: Фаза
-        if current_level == 0:
-            if cell_value.startswith(('Отливка', 'Зачистка', 'Дробеструй', 'Токарка', 
-                                     'Фрезеровка', 'Слесарка', 'Алюминий')):
-                phase_name = cell_value.split()[0].lower()
-                if phase_name == 'алюминий':
-                    phase_name = 'материал'
-                elif phase_name == 'токарка':
-                    phase_name = 'фрезеровка'
-                
-                state['phase'] = phase_name
-                state['assembly'] = None
-                state['detail_code'] = None
+        if phase_pattern.match(cell_value):
+            current_level = 0
+            phase_name = cell_value.split()[0].lower()
+            if phase_name == 'алюминий':
+                phase_name = 'материал'
+            elif phase_name == 'токарка':
+                phase_name = 'фрезеровка'
+            state['phase'] = phase_name
+            state['assembly'] = None
+            state['detail_code'] = None
         
-        # Уровень 1: Артикул/Сборка
-        elif current_level == 1:
+        # Уровень 1: Сборка
+        elif assembly_pattern.search(cell_value):
+            current_level = 1
             state['assembly'] = cell_value
+            state['detail_code'] = None
         
-        # Уровень 2: Деталь
-        elif current_level == 2:
+        # Уровень 2: Скобки - пропускаем
+        elif bracket_pattern.match(cell_value):
+            current_level = 2
+            continue
+        
+        # Уровень 3: Деталь
+        elif detail_pattern.search(cell_value):
+            current_level = 3
             match = re.search(r'\((К\d+\.\d+\.\d+[^\)]*)\)', cell_value)
             if match:
                 state['detail_code'] = match.group(1)
@@ -187,8 +194,49 @@ def parse_requirements_file(filepath, phase_filter=None):
                 if match:
                     state['detail_code'] = match.group(1)
         
-        # Уровень 3+: Дата
-        elif current_level >= 3:
+        # Уровень 4: Дата
+        elif date_pattern.search(cell_value):
+            current_level = 4
+            if state['detail_code'] and state['phase']:
+                try:
+                    if isinstance(cell_value, str):
+                        req_date = datetime.strptime(cell_value.split()[0], '%d.%m.%Y').date()
+                    else:
+                        req_date = pd.to_datetime(cell_value).date()
+                    
+                    req_month = req_date.replace(day=1)
+                    
+                    # Количество
+                    quantity = 0
+                    for col in range(1, ncols):
+                        val = row[col]
+                        if pd.notna(val) and val != '-':
+                            try:
+                                quantity = int(val)
+                                break
+                            except:
+                                pass
+                    
+                    if quantity > 0:
+                        record = {
+                            'detail_code': state['detail_code'],
+                            'phase': state['phase'],
+                            'assembly': state['assembly'],
+                            'requirement_month': req_month,
+                            'required_quantity': quantity
+                        }
+                        
+                        if phase_filter is None or phase_filter == 'all':
+                            records.append(record)
+                        elif phase_filter in phase_map and state['phase'] == phase_map[phase_filter]:
+                            records.append(record)
+                
+                except (ValueError, AttributeError):
+                    pass
+        
+        # DEBUG
+        if current_level is not None:
+            print(f"Строка {i:3d} | Уровень {current_level}: {cell_value[:60]}")
             if state['detail_code'] and state['phase']:
                 try:
                     if isinstance(cell_value, str):
