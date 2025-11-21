@@ -125,94 +125,81 @@ def parse_requirements_file(filepath, phase_filter=None):
     
     print(f"\n📊 Начало данных: строка {start_row}\n")
     
-    # 4. Парсим данные с определением уровня по паттерну содержимого
+    # 4. Парсим данные: уровень по колонке, тип по паттерну
     records = []
-    state = {
-        'phase': None,
-        'assembly': None,
-        'detail_code': None
-    }
+    state = {'phase': None, 'assembly': None, 'detail_code': None}
     
-    # Паттерны для определения уровня
-    phase_pattern = re.compile(r'^(Отливка|Зачистка|Дробеструй|Токарка|Фрезеровка|Слесарка|Алюминий)')
-    assembly_pattern = re.compile(r'^\d{4}$|кресло|Лестница|Комплект|Опора|Привод|Поручень')
-    bracket_pattern = re.compile(r'^\(\d+-\d+\)$')  # (1-4)
-    detail_pattern = re.compile(r'К\d+\.\d+\.\d+')
-    date_pattern = re.compile(r'\d{2}\.\d{2}\.\d{4}')
+    # Паттерны для типов данных
+    phase_pat = re.compile(r'^(Отливка|Зачистка|Дробеструй|Токарка|Фрезеровка|Слесарка|Алюминий)')
+    detail_pat = re.compile(r'К\d+\.\d+\.\d+')
+    date_pat = re.compile(r'\d{2}\.\d{2}\.\d{4}')
     
     for i in range(start_row, nrows):
         row = df.iloc[i]
-        
         if is_empty_row(row):
             continue
         
-        # Берём первую непустую ячейку
+        # Находим первую непустую ячейку и её колонку
         cell_value = None
+        cell_col = None
         for col in range(ncols):
             val = row[col]
             if pd.notna(val) and str(val).strip() and str(val).strip() != '-':
                 cell_value = str(val).strip()
+                cell_col = col
                 break
         
         if not cell_value:
             continue
         
-        # Определяем уровень по паттерну
+        # Определяем уровень по колонке
         current_level = None
+        for level_idx, level in enumerate(hierarchy_levels):
+            if level['col'] == cell_col:
+                current_level = level_idx
+                break
         
-        # Уровень 0: Фаза
-        if phase_pattern.match(cell_value):
-            current_level = 0
-            phase_name = cell_value.split()[0].lower()
-            if phase_name == 'алюминий':
-                phase_name = 'материал'
-            elif phase_name == 'токарка':
-                phase_name = 'фрезеровка'
-            state['phase'] = phase_name
-            state['assembly'] = None
-            state['detail_code'] = None
+        if current_level is None:
+            continue
         
-        # Уровень 1: Сборка
-        elif assembly_pattern.search(cell_value):
-            current_level = 1
+        print(f"Строка {i:3d} | Уровень {current_level} (col {cell_col}): {cell_value[:50]}")
+        
+        # Обработка по уровню + паттерну
+        if current_level == 0:  # Фаза
+            if phase_pat.match(cell_value):
+                phase = cell_value.split()[0].lower()
+                if phase == 'алюминий': phase = 'материал'
+                elif phase == 'токарка': phase = 'фрезеровка'
+                state['phase'] = phase
+                state['assembly'] = None
+                state['detail_code'] = None
+        
+        elif current_level == 1:  # Сборка/Артикул
             state['assembly'] = cell_value
             state['detail_code'] = None
         
-        # Уровень 2: Скобки - пропускаем
-        elif bracket_pattern.match(cell_value):
-            current_level = 2
-            continue
-        
-        # Уровень 3: Деталь
-        elif detail_pattern.search(cell_value):
-            current_level = 3
+        elif current_level == 3:  # Деталь
             match = re.search(r'\((К\d+\.\d+\.\d+[^\)]*)\)', cell_value)
             if match:
                 state['detail_code'] = match.group(1)
             else:
-                match = re.search(r'(К\d+\.\d+\.\d+[\.\d]*)', cell_value)
+                match = detail_pat.search(cell_value)
                 if match:
-                    state['detail_code'] = match.group(1)
+                    state['detail_code'] = match.group(0)
         
-        # Уровень 4: Дата
-        elif date_pattern.search(cell_value):
-            current_level = 4
-            if state['detail_code'] and state['phase']:
+        elif current_level == 4:  # Дата
+            if date_pat.search(cell_value) and state['detail_code'] and state['phase']:
                 try:
-                    if isinstance(cell_value, str):
-                        req_date = datetime.strptime(cell_value.split()[0], '%d.%m.%Y').date()
-                    else:
-                        req_date = pd.to_datetime(cell_value).date()
-                    
+                    req_date = datetime.strptime(cell_value.split()[0], '%d.%m.%Y').date()
                     req_month = req_date.replace(day=1)
                     
-                    # Количество
+                    # Количество в следующих колонках
                     quantity = 0
-                    for col in range(1, ncols):
+                    for col in range(cell_col + 1, ncols):
                         val = row[col]
                         if pd.notna(val) and val != '-':
                             try:
-                                quantity = int(val)
+                                quantity = int(float(str(val).replace(',', '.')))
                                 break
                             except:
                                 pass
@@ -230,13 +217,10 @@ def parse_requirements_file(filepath, phase_filter=None):
                             records.append(record)
                         elif phase_filter in phase_map and state['phase'] == phase_map[phase_filter]:
                             records.append(record)
-                
                 except (ValueError, AttributeError):
                     pass
-        
-        # DEBUG
-        if current_level is not None:
-            print(f"Строка {i:3d} | Уровень {current_level}: {cell_value[:60]}")
+    
+    return records
             if state['detail_code'] and state['phase']:
                 try:
                     if isinstance(cell_value, str):
