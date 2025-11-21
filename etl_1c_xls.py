@@ -28,106 +28,183 @@ from psycopg2.extras import execute_batch
 # ПАРСЕРЫ ФАЙЛОВ 1С
 # ============================================================================
 
-def parse_requirements_file(filepath):
+def is_empty_row(row):
+    """Проверка что строка пустая"""
+    return row.isna().all() or (row.astype(str).str.strip() == '').all()
+
+
+def parse_requirements_file(filepath, phase_filter=None):
     """
     Парсинг файла "Анализ обеспеченности заказов" (Отливка.xlsx)
     
-    Структура файла:
-    - Строка 7-9: заголовки
-    - Далее: иерархия (фаза → сборка → деталь → даты)
+    Args:
+        filepath: путь к файлу
+        phase_filter: фильтр по фазе ('ot'|'za'|'dr'|'fr'|'ma'|'all'|None)
     
     Возвращает: список dict с полями:
-        - detail_name: название детали
-        - phase: фаза обработки  
-        - requirement_date: дата потребности
+        - detail_code: код детали
+        - phase: фаза обработки
+        - assembly: сборка (опционально)
+        - requirement_month: месяц потребности
         - required_quantity: количество
-        - nzp: НЗП (незавершенное производство)
-        - reserved: зарезервировано на складе
-        - ordered: размещено в заказах
     """
+    # Маппинг phase_filter -> фаза
+    phase_map = {
+        'ot': 'отливка',
+        'za': 'зачистка', 
+        'dr': 'дробеструй',
+        'fr': 'фрезеровка',
+        'ma': 'материал'
+    }
+    
     df = pd.read_excel(filepath, sheet_name=0, header=None)
+    nrows, ncols = df.shape
     
-    records = []
-    current_phase = None
-    current_assembly = None
-    current_detail = None
+    # 1. Находим и парсим заголовки - это наша иерархия
+    hierarchy_levels = []
+    start_row = None
     
-    # Начинаем со строки 12 (после заголовков)
-    for i in range(12, len(df)):
+    for i in range(min(20, nrows)):  # Ищем в первых 20 строках
         row = df.iloc[i]
-        
-        # Первая колонка всегда NaN, данные во второй
-        name = row[1]
-        
-        if pd.isna(name):
+        if is_empty_row(row):
             continue
             
-        name = str(name).strip()
+        cell = str(row[1]) if pd.notna(row[1]) else ''
         
-        # Пропускаем пустые строки
-        if not name or name == '-':
+        # Ищем заголовки группировки
+        if re.search(r'Характеристика|Номенклатура|Заказ', cell):
+            # Сканируем всю строку - каждая непустая ячейка = уровень иерархии
+            for col in range(ncols):
+                val = str(row[col]) if pd.notna(row[col]) else ''
+                val = val.strip()
+                if val and val != '-':
+                    hierarchy_levels.append({
+                        'col': col,
+                        'name': val,
+                        'type': None  # определим позже
+                    })
+            
+            # Следующая непустая строка = начало данных
+            for j in range(i + 1, min(i + 5, nrows)):
+                if not is_empty_row(df.iloc[j]):
+                    start_row = j
+                    break
+            break
+    
+    if start_row is None:
+        start_row = 0
+    
+    print(f"📊 Найдено уровней иерархии: {len(hierarchy_levels)}")
+    for idx, level in enumerate(hierarchy_levels):
+        print(f"   Уровень {idx}: колонка {level['col']} - {level['name']}")
+    
+    # 2. Парсим данные с отслеживанием уровня
+    records = []
+    state = {
+        'phase': None,
+        'assembly': None,
+        'detail_code': None
+    }
+    
+    for i in range(start_row, nrows):
+        row = df.iloc[i]
+        
+        if is_empty_row(row):
             continue
         
-        # Определяем тип строки
+        # Определяем уровень текущей строки по первой непустой ячейке
+        current_level = None
+        cell_value = None
         
-        # 1. Фаза обработки (Дробеструй, Зачистка и т.д.)
-        if name in ['Дробеструй', 'Зачистка', 'Отливка', 'Фрезеровка', 'Токарка', 
-                    'Покраска', 'Слесарка', 'Алюминий 4 и 5 месяцев',
-                    'Алюминий и сплавы алюминиевые']:
-            current_phase = name if name not in ['Алюминий 4 и 5 месяцев', 
-                                                   'Алюминий и сплавы алюминиевые'] else None
-            current_assembly = None
-            current_detail = None
+        for level_idx, level in enumerate(hierarchy_levels):
+            col = level['col']
+            val = row[col]
+            if pd.notna(val) and str(val).strip() and str(val).strip() != '-':
+                current_level = level_idx
+                cell_value = str(val).strip()
+                break
+        
+        if current_level is None:
             continue
         
-        # 2. Сборка (число или название типа "4523", "Иволга кресло")
-        if (isinstance(name, (int, float)) or 
-            any(x in name for x in ['кресло', 'Лестница', 'Комплект', 'Опора', 'Привод'])):
-            current_assembly = name
-            current_detail = None
-            continue
+        # Обработка в зависимости от уровня
         
-        # 3. Деталь (содержит код типа К03.02.004)
-        if re.search(r'К\d+\.\d+\.\d+', name):
-            current_detail = name
-            continue
+        # Уровень 0: Фаза (Характеристика)
+        if current_level == 0:
+            if cell_value.startswith(('Отливка', 'Зачистка', 'Дробеструй', 'Токарка', 
+                                     'Фрезеровка', 'Слесарка', 'Алюминий')):
+                phase_name = cell_value.split()[0].lower()
+                if phase_name == 'алюминий':
+                    phase_name = 'материал'
+                elif phase_name == 'токарка':
+                    phase_name = 'фрезеровка'
+                
+                state['phase'] = phase_name
+                state['assembly'] = None
+                state['detail_code'] = None
+                print(f"📌 Фаза: {state['phase']}")
         
-        # 4. Дата (формат 01.02.2026 0:00:00 или дата)
-        if current_detail and current_phase:
-            # Проверяем, это дата?
-            try:
-                # Пытаемся распарсить как дату
-                if isinstance(name, datetime):
-                    req_date = name.date()
-                else:
-                    # Формат "01.02.2026 0:00:00"
-                    req_date = datetime.strptime(name.split()[0], '%d.%m.%Y').date()
+        # Уровень 1: Артикул/Сборка (пропускаем пока)
+        elif current_level == 1:
+            pass
+        
+        # Уровень 2: Деталь
+        elif current_level == 2:
+            # Извлекаем код детали
+            match = re.search(r'\((К\d+\.\d+\.\d+[^\)]*)\)', cell_value)
+            if match:
+                state['detail_code'] = match.group(1)
+                print(f"  📦 Деталь: {state['detail_code']} (скобки)")
+            else:
+                match = re.search(r'(К\d+\.\d+\.\d+[\.\d]*)', cell_value)
+                if match:
+                    state['detail_code'] = match.group(1)
+                    print(f"  📦 Деталь: {state['detail_code']} (паттерн)")
+        
+        # Уровень 3+: Дата и данные
+        elif current_level >= 3:
+            if state['detail_code'] and state['phase']:
+                try:
+                    # Парсим дату
+                    if isinstance(cell_value, str):
+                        req_date = datetime.strptime(cell_value.split()[0], '%d.%m.%Y').date()
+                    else:
+                        req_date = pd.to_datetime(cell_value).date()
+                    
+                    # Округляем до месяца
+                    req_month = req_date.replace(day=1)
+                    
+                    # Количество - ищем в следующих колонках
+                    quantity = 0
+                    for col in range(hierarchy_levels[current_level]['col'] + 1, ncols):
+                        val = row[col]
+                        if pd.notna(val) and val != '-':
+                            try:
+                                quantity = int(val)
+                                break
+                            except:
+                                pass
+                    
+                    if quantity > 0:
+                        record = {
+                            'detail_code': state['detail_code'],
+                            'phase': state['phase'],
+                            'assembly': state['assembly'],
+                            'requirement_month': req_month,
+                            'required_quantity': quantity
+                        }
+                        
+                        # Фильтр по фазе
+                        if phase_filter is None or phase_filter == 'all':
+                            records.append(record)
+                            print(f"    ✓ {req_month.strftime('%Y-%m')}: {quantity} шт")
+                        elif phase_filter in phase_map:
+                            if state['phase'] == phase_map[phase_filter]:
+                                records.append(record)
+                                print(f"    ✓ {req_month.strftime('%Y-%m')}: {quantity} шт")
                 
-                # Извлекаем значения
-                potreb = row[2]  # Потребность
-                nzp = row[3]     # НЗП
-                reserved = row[4]  # Зарезервировано
-                ordered = row[5]   # Размещено в заказах
-                
-                # Конвертируем '-' в 0
-                def to_num(val):
-                    if pd.isna(val) or val == '-':
-                        return 0
-                    return int(val)
-                
-                records.append({
-                    'detail_name': current_detail,
-                    'phase': current_phase.lower(),
-                    'requirement_date': req_date,
-                    'required_quantity': to_num(potreb),
-                    'nzp': to_num(nzp),
-                    'reserved': to_num(reserved),
-                    'ordered': to_num(ordered)
-                })
-                
-            except (ValueError, AttributeError):
-                # Не дата - пропускаем
-                pass
+                except (ValueError, AttributeError) as e:
+                    pass
     
     return records
 
@@ -417,6 +494,9 @@ def main():
                        help='Connection string (или DATABASE_URL)')
     parser.add_argument('--requirements', '-r',
                        help='Файл с потребностями (Отливка.xlsx)')
+    parser.add_argument('--phase', '-p',
+                       choices=['ot', 'za', 'dr', 'fr', 'ma', 'all'],
+                       help='Фильтр по фазе: ot=отливка, za=зачистка, dr=дробеструй, fr=фрезер, ma=материал, all=все')
     parser.add_argument('--inventory', '-i',
                        help='Файл с остатками склада')
     parser.add_argument('--materials', '-m',
@@ -462,9 +542,12 @@ def main():
                 print(f"❌ Файл не найден: {filepath}")
                 sys.exit(1)
             
+            phase_filter = args.phase if hasattr(args, 'phase') else None
             print(f"\n📄 Парсинг файла потребностей: {filepath}")
-            records = parse_requirements_file(filepath)
-            print(f"  Распознано записей: {len(records)}")
+            if phase_filter:
+                print(f"   Фильтр по фазе: {phase_filter}")
+            records = parse_requirements_file(filepath, phase_filter)
+            print(f"\n✅ Распознано записей: {len(records)}")
             
             if records and not args.dry_run:
                 load_requirements(conn, records)
