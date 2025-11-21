@@ -40,15 +40,7 @@ def parse_requirements_file(filepath, phase_filter=None):
     Args:
         filepath: путь к файлу
         phase_filter: фильтр по фазе ('ot'|'za'|'dr'|'fr'|'ma'|'all'|None)
-    
-    Возвращает: список dict с полями:
-        - detail_code: код детали
-        - phase: фаза обработки
-        - assembly: сборка (опционально)
-        - requirement_month: месяц потребности
-        - required_quantity: количество
     """
-    # Маппинг phase_filter -> фаза
     phase_map = {
         'ot': 'отливка',
         'za': 'зачистка', 
@@ -60,45 +52,67 @@ def parse_requirements_file(filepath, phase_filter=None):
     df = pd.read_excel(filepath, sheet_name=0, header=None)
     nrows, ncols = df.shape
     
-    # 1. Находим и парсим заголовки - это наша иерархия
-    hierarchy_levels = []
-    start_row = None
+    # 1. Пропускаем служебные строки (описание отчёта)
+    current_row = 0
+    service_patterns = [r'Группировки строк', r'Отбор', r'Упорядочивание', 
+                       r'Оформление', r'Настройки']
     
-    for i in range(min(20, nrows)):  # Ищем в первых 20 строках
-        row = df.iloc[i]
+    while current_row < min(15, nrows):
+        row = df.iloc[current_row]
         if is_empty_row(row):
+            current_row += 1
             continue
-            
-        cell = str(row[1]) if pd.notna(row[1]) else ''
         
-        # Ищем заголовки группировки
-        if re.search(r'Характеристика|Номенклатура|Заказ', cell):
-            # Сканируем всю строку - каждая непустая ячейка = уровень иерархии
-            for col in range(ncols):
-                val = str(row[col]) if pd.notna(row[col]) else ''
-                val = val.strip()
-                if val and val != '-':
-                    hierarchy_levels.append({
-                        'col': col,
-                        'name': val,
-                        'type': None  # определим позже
-                    })
-            
-            # Следующая непустая строка = начало данных
-            for j in range(i + 1, min(i + 5, nrows)):
-                if not is_empty_row(df.iloc[j]):
-                    start_row = j
-                    break
+        # Проверяем первую непустую ячейку
+        first_cell = None
+        for col in range(ncols):
+            val = str(row[col]) if pd.notna(row[col]) else ''
+            if val.strip():
+                first_cell = val
+                break
+        
+        # Служебная строка?
+        if first_cell and any(re.search(pattern, first_cell) for pattern in service_patterns):
+            print(f"⏭️  Пропуск служебной строки {current_row}: {first_cell[:50]}...")
+            current_row += 1
+            continue
+        
+        # Заголовки найдены?
+        if first_cell and re.search(r'Характеристика|Номенклатура|Заказ', first_cell):
             break
+        
+        current_row += 1
     
-    if start_row is None:
-        start_row = 0
+    # 2. Парсим заголовки - это иерархия
+    hierarchy_levels = []
+    header_row = current_row
     
-    print(f"📊 Найдено уровней иерархии: {len(hierarchy_levels)}")
-    for idx, level in enumerate(hierarchy_levels):
-        print(f"   Уровень {idx}: колонка {level['col']} - {level['name']}")
+    if header_row < nrows:
+        row = df.iloc[header_row]
+        print(f"\n📋 Строка заголовков: {header_row}")
+        
+        for col in range(ncols):
+            val = str(row[col]) if pd.notna(row[col]) else ''
+            val = val.strip()
+            if val and val != '-':
+                hierarchy_levels.append({
+                    'col': col,
+                    'name': val
+                })
+                print(f"   Уровень {len(hierarchy_levels)-1}: колонка {col} - '{val}'")
     
-    # 2. Парсим данные с отслеживанием уровня
+    if not hierarchy_levels:
+        print("❌ Не найдены заголовки иерархии")
+        return []
+    
+    # 3. Начало данных - после заголовков + пустые строки
+    start_row = header_row + 1
+    while start_row < nrows and is_empty_row(df.iloc[start_row]):
+        start_row += 1
+    
+    print(f"\n📊 Начало данных: строка {start_row}\n")
+    
+    # 4. Парсим данные с debug выводом уровня
     records = []
     state = {
         'phase': None,
@@ -112,7 +126,7 @@ def parse_requirements_file(filepath, phase_filter=None):
         if is_empty_row(row):
             continue
         
-        # Определяем уровень текущей строки по первой непустой ячейке
+        # Определяем уровень по первой непустой ячейке
         current_level = None
         cell_value = None
         
@@ -127,9 +141,12 @@ def parse_requirements_file(filepath, phase_filter=None):
         if current_level is None:
             continue
         
+        # DEBUG: выводим уровень
+        print(f"Строка {i:3d} | Уровень {current_level}: {cell_value[:60]}")
+        
         # Обработка в зависимости от уровня
         
-        # Уровень 0: Фаза (Характеристика)
+        # Уровень 0: Фаза
         if current_level == 0:
             if cell_value.startswith(('Отливка', 'Зачистка', 'Дробеструй', 'Токарка', 
                                      'Фрезеровка', 'Слесарка', 'Алюминий')):
@@ -142,39 +159,33 @@ def parse_requirements_file(filepath, phase_filter=None):
                 state['phase'] = phase_name
                 state['assembly'] = None
                 state['detail_code'] = None
-                print(f"📌 Фаза: {state['phase']}")
         
-        # Уровень 1: Артикул/Сборка (пропускаем пока)
+        # Уровень 1: Артикул/Сборка
         elif current_level == 1:
-            pass
+            state['assembly'] = cell_value
         
         # Уровень 2: Деталь
         elif current_level == 2:
-            # Извлекаем код детали
             match = re.search(r'\((К\d+\.\d+\.\d+[^\)]*)\)', cell_value)
             if match:
                 state['detail_code'] = match.group(1)
-                print(f"  📦 Деталь: {state['detail_code']} (скобки)")
             else:
                 match = re.search(r'(К\d+\.\d+\.\d+[\.\d]*)', cell_value)
                 if match:
                     state['detail_code'] = match.group(1)
-                    print(f"  📦 Деталь: {state['detail_code']} (паттерн)")
         
-        # Уровень 3+: Дата и данные
+        # Уровень 3+: Дата
         elif current_level >= 3:
             if state['detail_code'] and state['phase']:
                 try:
-                    # Парсим дату
                     if isinstance(cell_value, str):
                         req_date = datetime.strptime(cell_value.split()[0], '%d.%m.%Y').date()
                     else:
                         req_date = pd.to_datetime(cell_value).date()
                     
-                    # Округляем до месяца
                     req_month = req_date.replace(day=1)
                     
-                    # Количество - ищем в следующих колонках
+                    # Количество
                     quantity = 0
                     for col in range(hierarchy_levels[current_level]['col'] + 1, ncols):
                         val = row[col]
@@ -194,16 +205,12 @@ def parse_requirements_file(filepath, phase_filter=None):
                             'required_quantity': quantity
                         }
                         
-                        # Фильтр по фазе
                         if phase_filter is None or phase_filter == 'all':
                             records.append(record)
-                            print(f"    ✓ {req_month.strftime('%Y-%m')}: {quantity} шт")
-                        elif phase_filter in phase_map:
-                            if state['phase'] == phase_map[phase_filter]:
-                                records.append(record)
-                                print(f"    ✓ {req_month.strftime('%Y-%m')}: {quantity} шт")
+                        elif phase_filter in phase_map and state['phase'] == phase_map[phase_filter]:
+                            records.append(record)
                 
-                except (ValueError, AttributeError) as e:
+                except (ValueError, AttributeError):
                     pass
     
     return records
