@@ -98,14 +98,8 @@ def parse_requirements_file(filepath, phase_filter=None):
             if is_empty_row(row):
                 break
             
-            # Горизонтально: читаем все непустые ячейки для data_columns
-            for col in range(ncols):
-                val = str(row[col]) if pd.notna(row[col]) else ''
-                val = val.strip()
-                if val and val != '-':
-                    data_columns[col] = val  # Перезаписываем (для merged cells)
-            
             # Вертикально: ищем первую непустую ячейку для иерархии
+            hierarchy_cell_col = None
             for col in range(ncols):
                 val = str(row[col]) if pd.notna(row[col]) else ''
                 val = val.strip()
@@ -114,9 +108,19 @@ def parse_requirements_file(filepath, phase_filter=None):
                         'col': col,
                         'name': val
                     })
+                    hierarchy_cell_col = col
                     print(f"   Уровень {level_idx}: колонка {col} - '{val}'")
                     level_idx += 1
-                    break  # Только первая непустая ячейка
+                    break
+            
+            # Горизонтально: остальные ячейки в data_columns (пропускаем иерархию)
+            for col in range(ncols):
+                if col == hierarchy_cell_col:
+                    continue  # Пропускаем колонку иерархии
+                val = str(row[col]) if pd.notna(row[col]) else ''
+                val = val.strip()
+                if val and val != '-':
+                    data_columns[col] = val  # Перезаписываем (для merged cells)
             
             header_row += 1
         
@@ -155,7 +159,17 @@ def parse_requirements_file(filepath, phase_filter=None):
     
     # Определяем паттерны для каждого уровня иерархии
     def is_phase(text):
-        return bool(re.match(r'^(Отливка|Зачистка|Дробеструй|Токарка|Фрезеровка|Слесарка|Алюминий)', text))
+        phases = ['Отливка', 'Зачистка', 'Дробеструй', 'Токарка', 
+                  'Фрезеровка', 'Слесарка']
+        
+        if any(text.startswith(p) for p in phases):
+            return True
+        
+        # Алюминий как фаза: начинается с "Алюминий" и содержит "месяц"
+        if text.startswith('Алюминий') and 'месяц' in text.lower():
+            return True
+        
+        return False
     
     def is_assembly(text):
         return bool(re.search(r'^\d{4}$|кресло|Лестница|Комплект|Опора|Привод|Поручень', text))
@@ -164,6 +178,11 @@ def parse_requirements_file(filepath, phase_filter=None):
         return bool(re.match(r'^\(\d+-\d+\)$', text))  # (1-4)
     
     def is_detail(text):
+        # Номенклатура алюминий: начинается с "Алюминий" и содержит "сплав"
+        if text.startswith('Алюминий') and 'сплав' in text.lower():
+            return True
+        
+        # Детали с кодом К##.##.###
         return bool(re.search(r'К\d+\.\d+\.\d+', text))
     
     def is_date(text):
