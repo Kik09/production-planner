@@ -33,6 +33,245 @@ def is_empty_row(row):
     return row.isna().all() or (row.astype(str).str.strip() == '').all()
 
 
+def parse_inventory_file(filepath, snapshot_date=None):
+    """
+    Парсинг файла "Товары на складах"
+    
+    Структура:
+    - Уровень 0: Номенклатура
+    - Уровень 1: Характеристика (фаза обработки)
+    - Уровень 2: Склад
+    
+    Возвращает: список dict с полями:
+        - detail_code: код детали
+        - characteristic: характеристика/фаза
+        - warehouse: склад
+        - snapshot_date: дата снапшота
+        - quantity: конечный остаток
+    """
+    df = pd.read_excel(filepath, sheet_name=0, header=None)
+    nrows, ncols = df.shape
+    
+    print(f"DEBUG: Файл загружен, {nrows} строк, {ncols} колонок")
+    
+    if snapshot_date is None:
+        snapshot_date = datetime.now().date()
+    
+    # 1. Пропускаем служебные строки (содержат ':')
+    current_row = 0
+    
+    while current_row < min(15, nrows):
+        row = df.iloc[current_row]
+        if is_empty_row(row):
+            current_row += 1
+            continue
+        
+        first_cell = None
+        for col in range(ncols):
+            val = str(row[col]) if pd.notna(row[col]) else ''
+            if val.strip():
+                first_cell = val
+                break
+        
+        if first_cell and ':' in first_cell:
+            print(f"⏭️  Пропуск служебной строки {current_row}: {first_cell[:50]}...")
+            current_row += 1
+            continue
+        
+        # Заголовки найдены? (могут не содержать ':')
+        if first_cell and re.search(r'Номенклатура|Характеристика|Склад', first_cell, re.IGNORECASE):
+            break
+        
+        current_row += 1
+    
+    # 2. Парсим заголовки
+    hierarchy_levels = []
+    data_columns = [''] * ncols
+    header_row = current_row
+    
+    if header_row < nrows:
+        print(f"\n📋 Чтение заголовков начиная со строки {header_row}")
+        
+        level_idx = 0
+        while header_row < nrows:
+            row = df.iloc[header_row]
+            
+            if is_empty_row(row):
+                break
+            
+            # Вертикально: иерархия
+            hierarchy_cell_col = None
+            for col in range(ncols):
+                val = str(row[col]) if pd.notna(row[col]) else ''
+                val = val.strip()
+                if val and val != '-':
+                    hierarchy_levels.append({
+                        'col': col,
+                        'name': val
+                    })
+                    hierarchy_cell_col = col
+                    print(f"   Уровень {level_idx}: колонка {col} - '{val}'")
+                    level_idx += 1
+                    break
+            
+            # Горизонтально: data_columns
+            for col in range(ncols):
+                if col == hierarchy_cell_col:
+                    continue
+                val = str(row[col]) if pd.notna(row[col]) else ''
+                val = val.strip()
+                if val and val != '-':
+                    data_columns[col] = val
+            
+            header_row += 1
+        
+        print(f"\n📊 Колонки данных:")
+        for col_idx, col_name in enumerate(data_columns):
+            if col_name:
+                print(f"   Колонка {col_idx}: '{col_name}'")
+    
+    if not hierarchy_levels:
+        print("❌ Не найдены заголовки иерархии")
+        return []
+    
+    # 3. Начало данных
+    start_row = header_row
+    while start_row < nrows and is_empty_row(df.iloc[start_row]):
+        start_row += 1
+    
+    print(f"\n📊 Начало данных: строка {start_row}\n")
+    
+    # 4. Парсим данные
+    records = []
+    state = {
+        'nomenclature': None,
+        'detail_code': None,
+        'characteristic': None,
+        'warehouse': None
+    }
+    
+    hierarchy_col = hierarchy_levels[0]['col'] if hierarchy_levels else 0
+    
+    # Ищем колонку "Конечный остаток"
+    quantity_col = None
+    for col_idx, col_name in enumerate(data_columns):
+        if col_name and ('Конечный' in col_name or 'конечный' in col_name.lower()):
+            quantity_col = col_idx
+            break
+    
+    print(f"📊 Колонка иерархии: {hierarchy_col}, Колонка остатков: {quantity_col}\n")
+    
+    # Паттерны
+    def is_nomenclature(text):
+        # Номенклатура: содержит код К##.##.### или "Алюминий"
+        if re.search(r'К\d+\.\d+\.\d+', text):
+            return True
+        if text.startswith('Алюминий'):
+            return True
+        return False
+    
+    def is_characteristic(text):
+        # Характеристика: фазы обработки
+        phases = ['Отливка', 'Зачистка', 'Дробеструй', 'Токарка', 
+                  'Фрезеровка', 'Слесарка']
+        if any(text.startswith(p) for p in phases):
+            return True
+        if text.startswith('Алюминий') and 'месяц' in text.lower():
+            return True
+        return False
+    
+    def is_warehouse(text):
+        # Склад: начинается с пробелов или известные склады
+        if text.startswith('   '):
+            return True
+        warehouses = ['Литейный цех', 'Склад', 'бокс', 'Малярка', 'Материалы', 'Брак']
+        return any(w in text for w in warehouses)
+    
+    # Динамически строим матчеры
+    level_matchers = []
+    for level in hierarchy_levels:
+        name = level['name'].lower()
+        if 'номенклатура' in name:
+            level_matchers.append(is_nomenclature)
+        elif 'характеристика' in name:
+            level_matchers.append(is_characteristic)
+        elif 'склад' in name:
+            level_matchers.append(is_warehouse)
+        else:
+            level_matchers.append(lambda x: False)
+    
+    current_level = 0
+    
+    for i in range(start_row, nrows):
+        row = df.iloc[i]
+        if is_empty_row(row):
+            continue
+        
+        cell_value = row[hierarchy_col]
+        if pd.isna(cell_value) or not str(cell_value).strip() or str(cell_value).strip() == '-':
+            continue
+        
+        cell_value = str(cell_value).strip()
+        
+        # Пробуем матчить
+        matched = False
+        for level_idx, matcher in enumerate(level_matchers):
+            if matcher(cell_value):
+                current_level = level_idx
+                matched = True
+                break
+        
+        # Не совпало - инкремент или сброс
+        if not matched:
+            if current_level >= len(level_matchers) - 1:
+                current_level = 0
+            else:
+                current_level += 1
+        
+        print(f"Строка {i:3d} | Уровень {current_level}: {cell_value[:50]}")
+        
+        # Обработка по уровню
+        if current_level == 0:  # Номенклатура
+            state['nomenclature'] = cell_value
+            # Извлекаем код детали
+            match = re.search(r'К\d+\.\d+\.\d+[\.\d]*', cell_value)
+            if match:
+                state['detail_code'] = match.group(0)
+            else:
+                state['detail_code'] = None
+            state['characteristic'] = None
+            state['warehouse'] = None
+        
+        elif current_level == 1:  # Характеристика
+            state['characteristic'] = cell_value
+            state['warehouse'] = None
+        
+        elif current_level == 2:  # Склад
+            state['warehouse'] = cell_value.strip()
+            
+            # Записываем данные
+            if state['detail_code']:  # Только для деталей с кодом
+                quantity = 0
+                if quantity_col is not None:
+                    val = row[quantity_col]
+                    if pd.notna(val) and val != '-':
+                        try:
+                            quantity = int(float(str(val).replace(',', '.').replace(' ', '')))
+                        except:
+                            pass
+                
+                record = {
+                    'detail_code': state['detail_code'],
+                    'characteristic': state['characteristic'],
+                    'warehouse': state['warehouse'],
+                    'snapshot_date': snapshot_date,
+                    'quantity': quantity
+                }
+                records.append(record)
+    
+    return records
+
+
 def parse_requirements_file(filepath, phase_filter=None):
     """
     Парсинг файла "Анализ обеспеченности заказов" (Отливка.xlsx)
@@ -295,57 +534,6 @@ def parse_requirements_file(filepath, phase_filter=None):
                             records.append(record)
                 except (ValueError, AttributeError):
                     pass
-    
-    return records
-
-def parse_inventory_file(filepath):
-    """
-    Парсинг файла остатков склада
-    
-    Ожидаемая структура:
-    - Колонки: Номенклатура | Фаза | Склад | Количество
-    
-    Возвращает: список dict с полями:
-        - detail_name: название детали
-        - phase: фаза обработки
-        - warehouse_name: название склада
-        - quantity: количество
-    """
-    # Пытаемся найти заголовки
-    df = pd.read_excel(filepath, sheet_name=0, header=None)
-    
-    # Ищем строку с заголовками (содержит "Номенклатура")
-    header_row = None
-    for i in range(min(20, len(df))):
-        row_str = ' '.join([str(x) for x in df.iloc[i].tolist() if pd.notna(x)])
-        if 'Номенклатура' in row_str or 'номенклатура' in row_str.lower():
-            header_row = i
-            break
-    
-    if header_row is None:
-        raise ValueError("Не найдена строка с заголовками (должна содержать 'Номенклатура')")
-    
-    # Читаем с найденными заголовками
-    df = pd.read_excel(filepath, sheet_name=0, header=header_row)
-    
-    records = []
-    for _, row in df.iterrows():
-        # Пропускаем пустые строки
-        if pd.isna(row.get('Номенклатура')):
-            continue
-        
-        detail_name = str(row.get('Номенклатура', '')).strip()
-        phase = str(row.get('Фаза', 'отливка')).strip().lower()
-        warehouse = str(row.get('Склад', 'Склад отливок')).strip()
-        quantity = row.get('Количество', 0)
-        
-        if detail_name and quantity > 0:
-            records.append({
-                'detail_name': detail_name,
-                'phase': phase,
-                'warehouse_name': warehouse,
-                'quantity': int(quantity)
-            })
     
     return records
 
@@ -625,6 +813,20 @@ def main():
         conn = connect_db(conn_string)
     
     try:
+        # Импорт остатков на складах
+        if args.inventory:
+            filepath = Path(args.inventory)
+            if not filepath.exists():
+                print(f"❌ Файл не найден: {filepath}")
+                sys.exit(1)
+            
+            print(f"\n📄 Парсинг файла остатков: {filepath}")
+            records = parse_inventory_file(filepath)
+            print(f"\n✅ Распознано записей: {len(records)}")
+            
+            if records and not args.dry_run:
+                load_inventory(conn, records)
+        
         # Импорт потребностей
         if args.requirements:
             filepath = Path(args.requirements)
@@ -641,20 +843,6 @@ def main():
             
             if records and not args.dry_run:
                 load_requirements(conn, records)
-        
-        # Импорт остатков склада
-        if args.inventory:
-            filepath = Path(args.inventory)
-            if not filepath.exists():
-                print(f"❌ Файл не найден: {filepath}")
-                sys.exit(1)
-            
-            print(f"\n📄 Парсинг файла остатков: {filepath}")
-            records = parse_inventory_file(filepath)
-            print(f"  Распознано записей: {len(records)}")
-            
-            if records and not args.dry_run:
-                load_inventory(conn, records, snapshot_date)
         
         # Импорт остатков металла
         if args.materials:
