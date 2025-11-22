@@ -650,7 +650,7 @@ def load_requirements(conn, records, source='1C_import'):
             ON CONFLICT (detail_id, phase, requirement_month)
             DO UPDATE SET
                 required_quantity = EXCLUDED.required_quantity,
-                source = EXCLUDED.source,
+                source = EXCLUDED.source
                 
         """, inserts)
         
