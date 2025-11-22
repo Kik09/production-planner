@@ -613,7 +613,7 @@ def load_requirements(conn, records, source='1C_import'):
     print(f"\n=== Загрузка detail_requirements ({len(records)} записей) ===")
     
     # Получаем маппинг деталей по коду
-    cursor.execute("SELECT id, code FROM details")
+    cursor.execute("SELECT id, nomenclature_code FROM details")
     detail_map = {code: detail_id for detail_id, code in cursor.fetchall()}
     
     # Подготавливаем записи для вставки
@@ -673,7 +673,7 @@ def load_inventory(conn, records, snapshot_date=None):
     print(f"Дата снапшота: {snapshot_date}")
     
     # Получаем маппинги по кодам
-    cursor.execute("SELECT id, code FROM details")
+    cursor.execute("SELECT id, nomenclature_code FROM details")
     detail_map = {code: detail_id for detail_id, code in cursor.fetchall()}
     
     cursor.execute("SELECT id, warehouse_name FROM warehouses")
