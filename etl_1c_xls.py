@@ -81,8 +81,9 @@ def parse_requirements_file(filepath, phase_filter=None):
         
         current_row += 1
     
-    # 2. Парсим заголовки - это иерархия (может быть несколько строк!)
+    # 2. Парсим заголовки - иерархия (вертикально) и колонки данных (горизонтально)
     hierarchy_levels = []
+    data_columns = [''] * ncols  # Массив названий колонок данных
     header_row = current_row
     
     if header_row < nrows:
@@ -97,7 +98,14 @@ def parse_requirements_file(filepath, phase_filter=None):
             if is_empty_row(row):
                 break
             
-            # Ищем первую непустую ячейку в строке
+            # Горизонтально: читаем все непустые ячейки для data_columns
+            for col in range(ncols):
+                val = str(row[col]) if pd.notna(row[col]) else ''
+                val = val.strip()
+                if val and val != '-':
+                    data_columns[col] = val  # Перезаписываем (для merged cells)
+            
+            # Вертикально: ищем первую непустую ячейку для иерархии
             for col in range(ncols):
                 val = str(row[col]) if pd.notna(row[col]) else ''
                 val = val.strip()
@@ -111,6 +119,12 @@ def parse_requirements_file(filepath, phase_filter=None):
                     break  # Только первая непустая ячейка
             
             header_row += 1
+        
+        # Выводим data_columns
+        print(f"\n📊 Колонки данных:")
+        for col_idx, col_name in enumerate(data_columns):
+            if col_name:
+                print(f"   Колонка {col_idx}: '{col_name}'")
     
     if not hierarchy_levels:
         print("❌ Не найдены заголовки иерархии")
@@ -126,6 +140,18 @@ def parse_requirements_file(filepath, phase_filter=None):
     # 4. Парсим данные: паттерны для уровней + автоинкремент
     records = []
     state = {'phase': None, 'assembly': None, 'detail_code': None}
+    
+    # Определяем колонку иерархии (первый уровень)
+    hierarchy_col = hierarchy_levels[0]['col'] if hierarchy_levels else 1
+    
+    # Ищем колонку "Потребность"
+    quantity_col = None
+    for col_idx, col_name in enumerate(data_columns):
+        if 'Потребность' in col_name:
+            quantity_col = col_idx
+            break
+    
+    print(f"\n📊 Колонка иерархии: {hierarchy_col}, Колонка количества: {quantity_col}\n")
     
     # Определяем паттерны для каждого уровня иерархии
     def is_phase(text):
@@ -145,11 +171,11 @@ def parse_requirements_file(filepath, phase_filter=None):
     
     # Маппинг уровней на функции проверки
     level_matchers = [
-        is_phase,    # 0: ХарактеристикаНоменклатуры.Наименование
-        is_assembly, # 1: Номенклатура.Артикул
-        is_okp,      # 2: ХарактеристикаНоменклатуры.ОКП
-        is_detail,   # 3: Номенклатура
-        is_date      # 4: ЗаказНаПроизводство.Дата запуска
+        is_phase,    # 0
+        is_assembly, # 1
+        is_okp,      # 2
+        is_detail,   # 3
+        is_date      # 4
     ]
     
     current_level = 0
@@ -159,16 +185,12 @@ def parse_requirements_file(filepath, phase_filter=None):
         if is_empty_row(row):
             continue
         
-        # Первая непустая ячейка
-        cell_value = None
-        for col in range(ncols):
-            val = row[col]
-            if pd.notna(val) and str(val).strip() and str(val).strip() != '-':
-                cell_value = str(val).strip()
-                break
-        
-        if not cell_value:
+        # Читаем из фиксированной колонки иерархии
+        cell_value = row[hierarchy_col]
+        if pd.isna(cell_value) or not str(cell_value).strip() or str(cell_value).strip() == '-':
             continue
+        
+        cell_value = str(cell_value).strip()
         
         # Пробуем матчить против всех уровней
         matched = False
@@ -218,14 +240,13 @@ def parse_requirements_file(filepath, phase_filter=None):
                     req_date = datetime.strptime(cell_value.split()[0], '%d.%m.%Y').date()
                     req_month = req_date.replace(day=1)
                     
-                    # Количество
+                    # Количество из колонки "Потребность"
                     quantity = 0
-                    for col in range(1, ncols):
-                        val = row[col]
+                    if quantity_col is not None:
+                        val = row[quantity_col]
                         if pd.notna(val) and val != '-':
                             try:
                                 quantity = int(float(str(val).replace(',', '.')))
-                                break
                             except:
                                 pass
                     
