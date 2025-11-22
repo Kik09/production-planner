@@ -651,7 +651,7 @@ def load_requirements(conn, records, source='1C_import'):
             DO UPDATE SET
                 required_quantity = EXCLUDED.required_quantity,
                 source = EXCLUDED.source,
-                updated_at = CURRENT_TIMESTAMP
+                
         """, inserts)
         
         conn.commit()
