@@ -612,34 +612,27 @@ def load_requirements(conn, records, source='1C_import'):
     
     print(f"\n=== Загрузка detail_requirements ({len(records)} записей) ===")
     
-    # Получаем маппинг деталей
-    cursor.execute("SELECT id, name FROM details")
-    detail_map = {name: detail_id for detail_id, name in cursor.fetchall()}
+    # Получаем маппинг деталей по коду
+    cursor.execute("SELECT id, code FROM details")
+    detail_map = {code: detail_id for detail_id, code in cursor.fetchall()}
     
     # Подготавливаем записи для вставки
     inserts = []
     skipped = 0
     
     for rec in records:
-        # Ищем деталь по имени (может содержать доп. текст)
-        detail_id = None
-        for db_name, db_id in detail_map.items():
-            if db_name in rec['detail_name'] or rec['detail_name'] in db_name:
-                detail_id = db_id
-                break
+        # Ищем деталь по коду
+        detail_id = detail_map.get(rec['detail_code'])
         
         if not detail_id:
-            print(f"⚠️  Деталь не найдена: {rec['detail_name']}")
+            print(f"⚠️  Деталь не найдена: {rec['detail_code']}")
             skipped += 1
             continue
-        
-        # Округляем дату до первого числа месяца
-        req_month = rec['requirement_date'].replace(day=1)
         
         inserts.append((
             detail_id,
             rec['phase'],
-            req_month,
+            rec['requirement_month'],
             rec['required_quantity'],
             source
         ))
@@ -648,6 +641,25 @@ def load_requirements(conn, records, source='1C_import'):
         # Используем UPSERT для обновления существующих записей
         execute_batch(cursor, """
             INSERT INTO detail_requirements (
+                detail_id,
+                phase,
+                requirement_month,
+                required_quantity,
+                source
+            ) VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (detail_id, phase, requirement_month)
+            DO UPDATE SET
+                required_quantity = EXCLUDED.required_quantity,
+                source = EXCLUDED.source,
+                updated_at = CURRENT_TIMESTAMP
+        """, inserts)
+        
+        conn.commit()
+        print(f"✅ Загружено: {len(inserts)}, Пропущено: {skipped}")
+    else:
+        print(f"⚠️  Нет записей для загрузки (пропущено: {skipped})")
+    
+    cursor.close()
                 detail_id, phase, requirement_month, required_quantity, source
             )
             VALUES (%s, %s, %s, %s, %s)
@@ -673,9 +685,9 @@ def load_inventory(conn, records, snapshot_date=None):
     print(f"\n=== Загрузка inventory_snapshots ({len(records)} записей) ===")
     print(f"Дата снапшота: {snapshot_date}")
     
-    # Получаем маппинги
-    cursor.execute("SELECT id, name FROM details")
-    detail_map = {name: detail_id for detail_id, name in cursor.fetchall()}
+    # Получаем маппинги по кодам
+    cursor.execute("SELECT id, code FROM details")
+    detail_map = {code: detail_id for detail_id, code in cursor.fetchall()}
     
     cursor.execute("SELECT id, warehouse_name FROM warehouses")
     warehouse_map = {name: wh_id for wh_id, name in cursor.fetchall()}
@@ -688,26 +700,28 @@ def load_inventory(conn, records, snapshot_date=None):
     skipped = 0
     
     for rec in records:
-        # Находим деталь
-        detail_id = None
-        for db_name, db_id in detail_map.items():
-            if db_name in rec['detail_name'] or rec['detail_name'] in db_name:
-                detail_id = db_id
-                break
+        # Находим деталь по коду
+        detail_id = detail_map.get(rec['detail_code'])
         
         if not detail_id:
-            print(f"⚠️  Деталь не найдена: {rec['detail_name']}")
+            print(f"⚠️  Деталь не найдена: {rec['detail_code']}")
             skipped += 1
             continue
         
-        # Находим склад (или используем дефолтный)
-        warehouse_id = warehouse_map.get(rec['warehouse_name'], 
-                                         warehouse_map.get('Склад отливок'))
+        # Находим склад (используем частичное совпадение или дефолт)
+        warehouse_id = None
+        for wh_name, wh_id in warehouse_map.items():
+            if wh_name in rec['warehouse'] or rec['warehouse'] in wh_name:
+                warehouse_id = wh_id
+                break
+        
+        if not warehouse_id:
+            warehouse_id = warehouse_map.get('Склад отливок')
         
         inserts.append((
             snapshot_date,
             detail_id,
-            rec['phase'],
+            rec['characteristic'],  # Фаза обработки
             warehouse_id,
             rec['quantity']
         ))
@@ -721,9 +735,11 @@ def load_inventory(conn, records, snapshot_date=None):
         """, inserts)
         
         conn.commit()
+        print(f"✅ Загружено: {len(inserts)}, Пропущено: {skipped}")
+    else:
+        print(f"⚠️  Нет записей для загрузки (пропущено: {skipped})")
     
-    print(f"✅ Загружено: {len(inserts)}")
-    print(f"⚠️  Пропущено: {skipped}")
+    cursor.close()
 
 def load_materials(conn, records, snapshot_date=None):
     """Загрузка остатков металла в БД"""
