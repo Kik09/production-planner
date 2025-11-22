@@ -660,20 +660,7 @@ def load_requirements(conn, records, source='1C_import'):
         print(f"⚠️  Нет записей для загрузки (пропущено: {skipped})")
     
     cursor.close()
-                detail_id, phase, requirement_month, required_quantity, source
-            )
-            VALUES (%s, %s, %s, %s, %s)
-            ON CONFLICT (detail_id, phase, requirement_month) 
-            DO UPDATE SET 
-                required_quantity = EXCLUDED.required_quantity,
-                source = EXCLUDED.source,
-                updated_at = CURRENT_TIMESTAMP
-        """, inserts)
-        
-        conn.commit()
-    
-    print(f"✅ Загружено: {len(inserts)}")
-    print(f"⚠️  Пропущено: {skipped}")
+
 
 def load_inventory(conn, records, snapshot_date=None):
     """Загрузка остатков склада в БД"""
