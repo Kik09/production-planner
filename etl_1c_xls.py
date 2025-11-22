@@ -28,6 +28,9 @@ from psycopg2.extras import execute_batch
 # ПАРСЕРЫ ФАЙЛОВ 1С
 # ============================================================================
 
+# Константы
+PHASES = ['Отливка', 'Зачистка', 'Дробеструй', 'Токарка', 'Фрезеровка', 'Слесарка']
+
 def is_empty_row(row):
     """Проверка что строка пустая"""
     return row.isna().all() or (row.astype(str).str.strip() == '').all()
@@ -163,29 +166,28 @@ def parse_inventory_file(filepath, snapshot_date=None):
     
     # Паттерны
     def is_nomenclature(text):
-        # Номенклатура: содержит код К##.##.### или "Алюминий"
-        if re.search(r'К\d+\.\d+\.\d+', text):
+        # Алюминий и сплавы
+        if text.startswith('Алюминий') and 'сплав' in text.lower():
             return True
-        if text.startswith('Алюминий'):
+        # Детали с кодом К##.##.###
+        if re.search(r'К\d+\.\d+\.\d+', text):
             return True
         return False
     
     def is_characteristic(text):
-        # Характеристика: фазы обработки
-        phases = ['Отливка', 'Зачистка', 'Дробеструй', 'Токарка', 
-                  'Фрезеровка', 'Слесарка']
-        if any(text.startswith(p) for p in phases):
+        # Фазы обработки
+        if any(text.startswith(p) for p in PHASES):
             return True
-        if text.startswith('Алюминий') and 'месяц' in text.lower():
+        # Алюминий как характеристика: "Алюминий 4 и 5 месяцев/месацев"
+        if text.startswith('Алюминий') and 'мес' in text.lower():
             return True
         return False
     
     def is_warehouse(text):
-        # Склад: начинается с пробелов или известные склады
-        if text.startswith('   '):
-            return True
-        warehouses = ['Литейный цех', 'Склад', 'бокс', 'Малярка', 'Материалы', 'Брак']
-        return any(w in text for w in warehouses)
+        # Склад: содержит ключевые слова
+        warehouse_keywords = ['цех', 'бокс', 'этаж', 'Склад', 'Малярка', 
+                             'Материалы', 'Брак', 'шоссе']
+        return any(kw in text for kw in warehouse_keywords)
     
     # Динамически строим матчеры
     level_matchers = []
@@ -398,14 +400,11 @@ def parse_requirements_file(filepath, phase_filter=None):
     
     # Определяем паттерны для каждого уровня иерархии
     def is_phase(text):
-        phases = ['Отливка', 'Зачистка', 'Дробеструй', 'Токарка', 
-                  'Фрезеровка', 'Слесарка']
-        
-        if any(text.startswith(p) for p in phases):
+        if any(text.startswith(p) for p in PHASES):
             return True
         
-        # Алюминий как фаза: начинается с "Алюминий" и содержит "месяц"
-        if text.startswith('Алюминий') and 'месяц' in text.lower():
+        # Алюминий как фаза
+        if text.startswith('Алюминий') and 'мес' in text.lower():
             return True
         
         return False
