@@ -638,6 +638,9 @@ def load_requirements(conn, records, source='1C_import'):
         ))
     
     if inserts:
+        # Удаляем старые записи с этим source перед вставкой
+        cursor.execute("DELETE FROM detail_requirements WHERE source = %s", (source,))
+        
         # Используем UPSERT для обновления существующих записей
         execute_batch(cursor, """
             INSERT INTO detail_requirements (
@@ -647,11 +650,6 @@ def load_requirements(conn, records, source='1C_import'):
                 required_quantity,
                 source
             ) VALUES (%s, %s, %s, %s, %s)
-            ON CONFLICT (detail_id, phase, requirement_month)
-            DO UPDATE SET
-                required_quantity = EXCLUDED.required_quantity,
-                source = EXCLUDED.source
-                
         """, inserts)
         
         conn.commit()
