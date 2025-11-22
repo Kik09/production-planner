@@ -477,8 +477,11 @@ def parse_requirements_file(filepath, phase_filter=None):
         
         print(f"Строка {i:3d} | Уровень {current_level}: {cell_value[:50]}")
         
-        # Обработка по уровню
-        if current_level == 0:  # Фаза
+        # Обработка по типу уровня (не по номеру!)
+        level_name = hierarchy_levels[current_level]['name'].lower() if current_level < len(hierarchy_levels) else ''
+        
+        # Фаза
+        if 'характеристика' in level_name and 'наименование' in level_name:
             phase = cell_value.split()[0].lower()
             if phase == 'алюминий': phase = 'материал'
             elif phase == 'токарка': phase = 'фрезеровка'
@@ -486,14 +489,17 @@ def parse_requirements_file(filepath, phase_filter=None):
             state['assembly'] = None
             state['detail_code'] = None
         
-        elif current_level == 1:  # Сборка
+        # Сборка/Артикул
+        elif 'артикул' in level_name:
             state['assembly'] = cell_value
             state['detail_code'] = None
         
-        elif current_level == 2:  # ОКП - пропускаем
+        # ОКП - пропускаем
+        elif 'окп' in level_name:
             pass
         
-        elif current_level == 3:  # Деталь
+        # Деталь (Номенклатура)
+        elif 'номенклатура' in level_name and 'артикул' not in level_name:
             match = re.search(r'\((К\d+\.\d+\.\d+[^\)]*)\)', cell_value)
             if match:
                 state['detail_code'] = match.group(1)
@@ -502,7 +508,8 @@ def parse_requirements_file(filepath, phase_filter=None):
                 if match:
                     state['detail_code'] = match.group(0)
         
-        elif current_level == 4:  # Дата
+        # Дата
+        elif 'дата' in level_name:
             if state['detail_code'] and state['phase']:
                 try:
                     req_date = datetime.strptime(cell_value.split()[0], '%d.%m.%Y').date()
