@@ -188,14 +188,25 @@ def parse_requirements_file(filepath, phase_filter=None):
     def is_date(text):
         return bool(re.search(r'\d{2}\.\d{2}\.\d{4}', text))
     
-    # Маппинг уровней на функции проверки
-    level_matchers = [
-        is_phase,    # 0
-        is_assembly, # 1
-        is_okp,      # 2
-        is_detail,   # 3
-        is_date      # 4
-    ]
+    # Динамически строим level_matchers из hierarchy_levels
+    level_matchers = []
+    for level in hierarchy_levels:
+        name = level['name'].lower()
+        if 'характеристика' in name and 'наименование' in name:
+            level_matchers.append(is_phase)
+        elif 'артикул' in name:
+            level_matchers.append(is_assembly)
+        elif 'окп' in name:
+            level_matchers.append(is_okp)
+        elif 'номенклатура' in name:
+            level_matchers.append(is_detail)
+        elif 'дата' in name:
+            level_matchers.append(is_date)
+        else:
+            # Неизвестный уровень - пропускаем
+            level_matchers.append(lambda x: False)
+    
+    print(f"📊 Матчеры уровней: {len(level_matchers)} уровней\n")
     
     current_level = 0
     
