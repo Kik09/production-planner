@@ -36,29 +36,19 @@ def is_empty_row(row):
     return row.isna().all() or (row.astype(str).str.strip() == '').all()
 
 
-def parse_inventory_file(filepath, snapshot_date=None):
+def parse_hierarchical_file(filepath, level_matchers_builder, record_builder):
     """
-    Парсинг файла "Товары на складах"
+    Универсальный парсер иерархических файлов из 1С
     
-    Структура:
-    - Уровень 0: Номенклатура
-    - Уровень 1: Характеристика (фаза обработки)
-    - Уровень 2: Склад
+    Args:
+        filepath: путь к файлу
+        level_matchers_builder: функция(hierarchy_levels) -> list[matcher_func]
+        record_builder: функция(current_level, level_name, cell_value, row, state, data_columns) -> record или None
     
-    Возвращает: список dict с полями:
-        - detail_code: код детали
-        - characteristic: характеристика/фаза
-        - warehouse: склад
-        - snapshot_date: дата снапшота
-        - quantity: конечный остаток
+    Возвращает: список записей
     """
     df = pd.read_excel(filepath, sheet_name=0, header=None)
     nrows, ncols = df.shape
-    
-    print(f"DEBUG: Файл загружен, {nrows} строк, {ncols} колонок")
-    
-    if snapshot_date is None:
-        snapshot_date = datetime.now().date()
     
     # 1. Пропускаем служебные строки (содержат ':')
     current_row = 0
@@ -81,8 +71,8 @@ def parse_inventory_file(filepath, snapshot_date=None):
             current_row += 1
             continue
         
-        # Заголовки найдены? (могут не содержать ':')
-        if first_cell and re.search(r'Номенклатура|Характеристика|Склад', first_cell, re.IGNORECASE):
+        # Заголовки найдены?
+        if first_cell and re.search(r'Характеристика|Номенклатура|Склад', first_cell, re.IGNORECASE):
             break
         
         current_row += 1
@@ -144,64 +134,14 @@ def parse_inventory_file(filepath, snapshot_date=None):
     
     print(f"\n📊 Начало данных: строка {start_row}\n")
     
-    # 4. Парсим данные
+    # 4. Строим матчеры
+    level_matchers = level_matchers_builder(hierarchy_levels)
+    print(f"📊 Матчеры уровней: {len(level_matchers)} уровней\n")
+    
+    # 5. Парсим данные
     records = []
-    state = {
-        'nomenclature': None,
-        'detail_code': None,
-        'characteristic': None,
-        'warehouse': None
-    }
-    
+    state = {}
     hierarchy_col = hierarchy_levels[0]['col'] if hierarchy_levels else 0
-    
-    # Ищем колонку "Конечный остаток"
-    quantity_col = None
-    for col_idx, col_name in enumerate(data_columns):
-        if col_name and ('Конечный' in col_name or 'конечный' in col_name.lower()):
-            quantity_col = col_idx
-            break
-    
-    print(f"📊 Колонка иерархии: {hierarchy_col}, Колонка остатков: {quantity_col}\n")
-    
-    # Паттерны
-    def is_nomenclature(text):
-        # Алюминий и сплавы
-        if text.startswith('Алюминий') and 'сплав' in text.lower():
-            return True
-        # Детали с кодом К##.##.###
-        if re.search(r'К\d+\.\d+\.\d+', text):
-            return True
-        return False
-    
-    def is_characteristic(text):
-        # Фазы обработки
-        if any(text.startswith(p) for p in PHASES):
-            return True
-        # Алюминий как характеристика: "Алюминий 4 и 5 месяцев/месацев"
-        if text.startswith('Алюминий') and 'мес' in text.lower():
-            return True
-        return False
-    
-    def is_warehouse(text):
-        # Склад: содержит ключевые слова
-        warehouse_keywords = ['цех', 'бокс', 'этаж', 'Склад', 'Малярка', 
-                             'Материалы', 'Брак', 'шоссе']
-        return any(kw in text for kw in warehouse_keywords)
-    
-    # Динамически строим матчеры
-    level_matchers = []
-    for level in hierarchy_levels:
-        name = level['name'].lower()
-        if 'номенклатура' in name:
-            level_matchers.append(is_nomenclature)
-        elif 'характеристика' in name:
-            level_matchers.append(is_characteristic)
-        elif 'склад' in name:
-            level_matchers.append(is_warehouse)
-        else:
-            level_matchers.append(lambda x: False)
-    
     current_level = 0
     
     for i in range(start_row, nrows):
@@ -232,10 +172,81 @@ def parse_inventory_file(filepath, snapshot_date=None):
         
         print(f"Строка {i:3d} | Уровень {current_level}: {cell_value[:50]}")
         
-        # Обработка по уровню
-        if current_level == 0:  # Номенклатура
+        # Обработка через callback
+        level_name = hierarchy_levels[current_level]['name'].lower() if current_level < len(hierarchy_levels) else ''
+        record = record_builder(current_level, level_name, cell_value, row, state, data_columns)
+        
+        if record:
+            records.append(record)
+    
+    return records
+
+
+def parse_inventory_file(filepath, snapshot_date=None):
+    """Парсинг файла "Товары на складах" """
+    if snapshot_date is None:
+        snapshot_date = datetime.now().date()
+    
+    # Строим матчеры для инвентаря
+    def build_matchers(hierarchy_levels):
+        def is_nomenclature(text):
+            if text.startswith('Алюминий') and 'сплав' in text.lower():
+                return True
+            if re.search(r'К\d+\.\d+\.\d+', text):
+                return True
+            return False
+        
+        def is_characteristic(text):
+            if any(text.startswith(p) for p in PHASES):
+                return True
+            if text.startswith('Алюминий') and ('месяц' in text.lower() or 'месац' in text.lower()):
+                return True
+            return False
+        
+        def is_warehouse(text):
+            warehouse_keywords = ['цех', 'бокс', 'этаж', 'Склад', 'Малярка', 
+                                 'Материалы', 'Брак', 'шоссе']
+            return any(kw in text for kw in warehouse_keywords)
+        
+        matchers = []
+        for level in hierarchy_levels:
+            name = level['name'].lower()
+            if 'номенклатура' in name:
+                matchers.append(is_nomenclature)
+            elif 'характеристика' in name:
+                matchers.append(is_characteristic)
+            elif 'склад' in name:
+                matchers.append(is_warehouse)
+            else:
+                matchers.append(lambda x: False)
+        return matchers
+    
+    # Обработчик записей
+    inventory_state = {
+        'nomenclature': None,
+        'detail_code': None,
+        'characteristic': None,
+        'warehouse': None
+    }
+    
+    # Ищем колонку "Конечный остаток"
+    quantity_col_cache = [None]
+    
+    def build_record(current_level, level_name, cell_value, row, state, data_columns):
+        # Инициализируем state
+        if 'detail_code' not in state:
+            state.update(inventory_state)
+        
+        # Кэшируем колонку количества
+        if quantity_col_cache[0] is None:
+            for col_idx, col_name in enumerate(data_columns):
+                if col_name and ('Конечный' in col_name or 'конечный' in col_name.lower()):
+                    quantity_col_cache[0] = col_idx
+                    break
+        
+        # Уровень 0: Номенклатура
+        if 'номенклатура' in level_name:
             state['nomenclature'] = cell_value
-            # Извлекаем код детали
             match = re.search(r'К\d+\.\d+\.\d+[\.\d]*', cell_value)
             if match:
                 state['detail_code'] = match.group(0)
@@ -244,34 +255,36 @@ def parse_inventory_file(filepath, snapshot_date=None):
             state['characteristic'] = None
             state['warehouse'] = None
         
-        elif current_level == 1:  # Характеристика
+        # Уровень 1: Характеристика
+        elif 'характеристика' in level_name:
             state['characteristic'] = cell_value
             state['warehouse'] = None
         
-        elif current_level == 2:  # Склад
+        # Уровень 2: Склад
+        elif 'склад' in level_name:
             state['warehouse'] = cell_value.strip()
             
-            # Записываем данные
-            if state['detail_code']:  # Только для деталей с кодом
+            if state['detail_code']:
                 quantity = 0
-                if quantity_col is not None:
-                    val = row[quantity_col]
+                if quantity_col_cache[0] is not None:
+                    val = row[quantity_col_cache[0]]
                     if pd.notna(val) and val != '-':
                         try:
                             quantity = int(float(str(val).replace(',', '.').replace(' ', '')))
                         except:
                             pass
                 
-                record = {
+                return {
                     'detail_code': state['detail_code'],
                     'characteristic': state['characteristic'],
                     'warehouse': state['warehouse'],
                     'snapshot_date': snapshot_date,
                     'quantity': quantity
                 }
-                records.append(record)
+        
+        return None
     
-    return records
+    return parse_hierarchical_file(filepath, build_matchers, build_record)
 
 
 def parse_requirements_file(filepath, phase_filter=None):
